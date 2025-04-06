@@ -1,17 +1,17 @@
-// Extension entry point for VS Code
-const vscode = require('vscode');
-const fs = require('fs');
-const path = require('path');
-const { exec } = require('child_process');
-const axios = require('axios');
+import * as vscode from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
+import { exec } from 'child_process';
+import axios from 'axios';
 
 let geminiApiKey = '';
-let outputChannel;
+let outputChannel: vscode.OutputChannel;
 
 /**
- * @param {vscode.ExtensionContext} context
+ * This method is called when your extension is activated
+ * @param context - The extension context
  */
-function activate(context) {
+export function activate(context: vscode.ExtensionContext): void {
     // Create output channel for logging
     outputChannel = vscode.window.createOutputChannel("Documentation Maker");
     outputChannel.show(true); // Show the output channel immediately for debugging
@@ -20,7 +20,7 @@ function activate(context) {
 
     try {
         // Register commands with proper error handling
-        let initialSetupCommand = vscode.commands.registerCommand(
+        const initialSetupCommand = vscode.commands.registerCommand(
             'doc-maker.initialSetup', 
             () => {
                 outputChannel.appendLine('Initial setup command triggered');
@@ -28,7 +28,7 @@ function activate(context) {
             }
         );
         
-        let updateDocsCommand = vscode.commands.registerCommand(
+        const updateDocsCommand = vscode.commands.registerCommand(
             'doc-maker.updateDocs', 
             () => {
                 outputChannel.appendLine('Update docs command triggered');
@@ -45,18 +45,19 @@ function activate(context) {
         // Check for API key on startup
         checkApiKey();
         
-        // Show welcome message and setup instructions with explicit command execution
+        // Show welcome message and setup instructions
         showWelcomeMessage();
         
         outputChannel.appendLine('Documentation Maker activation completed successfully!');
     } catch (error) {
-        outputChannel.appendLine(`ERROR during activation: ${error.message}`);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        outputChannel.appendLine(`ERROR during activation: ${errorMessage}`);
         console.error('Documentation Maker activation error:', error);
-        vscode.window.showErrorMessage(`Documentation Maker failed to activate: ${error.message}`);
+        vscode.window.showErrorMessage(`Documentation Maker failed to activate: ${errorMessage}`);
     }
 }
 
-function showWelcomeMessage() {
+function showWelcomeMessage(): void {
     outputChannel.appendLine('Showing welcome message...');
     vscode.window.showInformationMessage(
         'Documentation Maker is active! Run "Documentation Maker: Initial Setup" to begin.',
@@ -64,21 +65,10 @@ function showWelcomeMessage() {
     ).then(selection => {
         if (selection === 'Setup Now') {
             outputChannel.appendLine('User selected "Setup Now" - executing initialSetup command');
-            // Use executeCommand with proper error handling
-            vscode.commands.executeCommand('doc-maker.initialSetup')
-                .then(() => outputChannel.appendLine('Command executed successfully'))
-                .catch(err => {
-                    outputChannel.appendLine(`Error executing command: ${err.message}`);
-                    // Provide user with direct function call as fallback
-                    vscode.window.showErrorMessage(
-                        'Failed to run setup command. Try manually running "Documentation Maker: Initial Setup" from the command palette.',
-                        'Try Again'
-                    ).then(selection => {
-                        if (selection === 'Try Again') {
-                            initialSetup();
-                        }
-                    });
-                });
+            // Use direct function call instead of executeCommand for reliability
+            initialSetup().catch((err: Error) => {
+                outputChannel.appendLine(`Error during setup: ${err.message}`);
+            });
         } else if (selection === 'Read Docs') {
             // If a README.md exists, open it
             const extensionPath = vscode.extensions.getExtension('akshaychame.documentation-maker')?.extensionPath;
@@ -89,13 +79,13 @@ function showWelcomeMessage() {
                 }
             }
         }
-    }).catch(err => {
+    }).then(undefined, (err: Error) => {
         outputChannel.appendLine(`Error showing welcome message: ${err.message}`);
     });
 }
 
-async function checkApiKey() {
-    geminiApiKey = vscode.workspace.getConfiguration('doc-maker').get('geminiApiKey');
+async function checkApiKey(): Promise<void> {
+    geminiApiKey = vscode.workspace.getConfiguration('doc-maker').get('geminiApiKey') || '';
     
     if (!geminiApiKey) {
         const key = await vscode.window.showInputBox({
@@ -118,7 +108,7 @@ async function checkApiKey() {
     }
 }
 
-async function initialSetup() {
+async function initialSetup(): Promise<void> {
     outputChannel.appendLine('Starting initial setup process...');
     
     if (!geminiApiKey) {
@@ -146,7 +136,7 @@ async function initialSetup() {
         fs.mkdirSync(docsFolder);
     }
 
-    vscode.window.withProgress({
+    await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: "Generating documentation",
         cancellable: true
@@ -169,7 +159,7 @@ async function initialSetup() {
     });
 }
 
-async function updateDocumentation() {
+async function updateDocumentation(): Promise<void> {
     outputChannel.appendLine('Starting documentation update process...');
     
     if (!geminiApiKey) {
@@ -199,7 +189,7 @@ async function updateDocumentation() {
         return;
     }
 
-    vscode.window.withProgress({
+    await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: "Updating documentation",
         cancellable: true
@@ -232,8 +222,8 @@ async function updateDocumentation() {
     });
 }
 
-async function getChangedFiles(rootPath) {
-    return new Promise((resolve, reject) => {
+async function getChangedFiles(rootPath: string): Promise<string[]> {
+    return new Promise((resolve) => {
         exec('git diff --name-only HEAD HEAD~1', { cwd: rootPath }, (error, stdout, stderr) => {
             if (error) {
                 outputChannel.appendLine(`Error getting changed files: ${error.message}`);
@@ -252,8 +242,8 @@ async function getChangedFiles(rootPath) {
     });
 }
 
-async function generateFileStructure(rootPath, docsFolder) {
-    return new Promise((resolve, reject) => {
+async function generateFileStructure(rootPath: string, docsFolder: string): Promise<void> {
+    return new Promise((resolve) => {
         exec('find . -type f -not -path "*/\\.*" -not -path "*/node_modules/*" -not -path "*/venv/*" | sort', 
             { cwd: rootPath }, 
             async (error, stdout, stderr) => {
@@ -275,8 +265,8 @@ async function generateFileStructure(rootPath, docsFolder) {
                     fs.writeFileSync(path.join(docsFolder, 'file-structure.md'), documentation);
                     resolve();
                 } catch (err) {
-                    outputChannel.appendLine(`Error with Gemini API: ${err.message}`);
-                    vscode.window.showErrorMessage(`Error with Gemini API: ${err.message}`);
+                    outputChannel.appendLine(`Error with Gemini API: ${err instanceof Error ? err.message : String(err)}`);
+                    vscode.window.showErrorMessage(`Error with Gemini API: ${err instanceof Error ? err.message : String(err)}`);
                     resolve();
                 }
             }
@@ -284,10 +274,10 @@ async function generateFileStructure(rootPath, docsFolder) {
     });
 }
 
-async function generateFileRelationships(rootPath, docsFolder) {
+async function generateFileRelationships(rootPath: string, docsFolder: string): Promise<void> {
     // For a real extension, you might want to use a code analysis tool
     // This is a simplified version that uses file imports as relationships
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
         exec('find . -type f -name "*.js" -o -name "*.ts" -o -name "*.py" -o -name "*.java" -o -name "*.go" | xargs grep -l "import\\|require\\|from" 2>/dev/null', 
             { cwd: rootPath }, 
             async (error, stdout, stderr) => {
@@ -336,8 +326,8 @@ async function generateFileRelationships(rootPath, docsFolder) {
                     fs.writeFileSync(path.join(docsFolder, 'file-relationships.md'), documentation);
                     resolve();
                 } catch (err) {
-                    outputChannel.appendLine(`Error with Gemini API: ${err.message}`);
-                    vscode.window.showErrorMessage(`Error with Gemini API: ${err.message}`);
+                    outputChannel.appendLine(`Error with Gemini API: ${err instanceof Error ? err.message : String(err)}`);
+                    vscode.window.showErrorMessage(`Error with Gemini API: ${err instanceof Error ? err.message : String(err)}`);
                     fs.writeFileSync(path.join(docsFolder, 'file-relationships.md'), fileRelations);
                     resolve();
                 }
@@ -346,8 +336,8 @@ async function generateFileRelationships(rootPath, docsFolder) {
     });
 }
 
-async function generateIndividualDocs(rootPath, docsFolder) {
-    return new Promise((resolve, reject) => {
+async function generateIndividualDocs(rootPath: string, docsFolder: string): Promise<void> {
+    return new Promise((resolve) => {
         exec('find . -type f -not -path "*/\\.*" -not -path "*/node_modules/*" -not -path "*/venv/*" -not -path "*/code-docs/*" | sort', 
             { cwd: rootPath }, 
             async (error, stdout, stderr) => {
@@ -378,7 +368,7 @@ async function generateIndividualDocs(rootPath, docsFolder) {
     });
 }
 
-async function updateFileDocs(rootPath, docsFolder, changedFiles) {
+async function updateFileDocs(rootPath: string, docsFolder: string, changedFiles: string[]): Promise<void> {
     const individualDocsFolder = path.join(docsFolder, 'files');
     
     if (!fs.existsSync(individualDocsFolder)) {
@@ -393,7 +383,7 @@ async function updateFileDocs(rootPath, docsFolder, changedFiles) {
     }
 }
 
-async function documentSingleFile(rootPath, docsFolder, filePath) {
+async function documentSingleFile(rootPath: string, docsFolder: string, filePath: string): Promise<void> {
     // Skip binary files, large files, etc.
     try {
         // Create directory structure if needed
@@ -437,16 +427,16 @@ ${content}
             const documentation = await generateWithGemini(prompt);
             fs.writeFileSync(fileDocPath, `# ${filePath}\n\n${documentation}`);
         } catch (err) {
-            outputChannel.appendLine(`Error generating documentation for ${filePath}: ${err.message}`);
-            fs.writeFileSync(fileDocPath, `# ${filePath}\n\nError generating documentation: ${err.message}`);
+            outputChannel.appendLine(`Error generating documentation for ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+            fs.writeFileSync(fileDocPath, `# ${filePath}\n\nError generating documentation: ${err instanceof Error ? err.message : String(err)}`);
         }
     } catch (err) {
-        outputChannel.appendLine(`Error processing file ${filePath}: ${err.message}`);
+        outputChannel.appendLine(`Error processing file ${filePath}: ${err instanceof Error ? err.message : String(err)}`);
         // Skip file if can't read
     }
 }
 
-async function generateWithGemini(prompt) {
+async function generateWithGemini(prompt: string): Promise<string> {
     try {
         outputChannel.appendLine('Calling Gemini API...');
         
@@ -474,7 +464,7 @@ async function generateWithGemini(prompt) {
             outputChannel.appendLine('Invalid response format from Gemini API: ' + JSON.stringify(response.data));
             throw new Error('Invalid response format from Gemini API');
         }
-    } catch (error) {
+    } catch (error: any) {
         outputChannel.appendLine(`Gemini API Error: ${error.message}`);
         if (error.response) {
             outputChannel.appendLine(`Status: ${error.response.status}, Data: ${JSON.stringify(error.response.data)}`);
@@ -483,9 +473,4 @@ async function generateWithGemini(prompt) {
     }
 }
 
-function deactivate() {}
-
-module.exports = {
-    activate,
-    deactivate
-};
+export function deactivate(): void {}
