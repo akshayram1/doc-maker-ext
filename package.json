@@ -1,8 +1,8 @@
 {
     "name": "documentation-maker",
     "displayName": "Documentation Maker",
-    "description": "AI-powered documentation generator for your code using Gemini 1.5 Pro",
-    "version": "0.2.1",
+    "description": "AI-powered documentation generator for your code using AI",
+    "version": "0.2.3",
     "publisher": "akshaychame",
     "author": {
       "name": "Akshay Chame"

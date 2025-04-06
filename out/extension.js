@@ -238,26 +238,103 @@ async function getChangedFiles(rootPath) {
         });
     });
 }
+async function getFilesRecursively(dir, ignoreDirs = ['node_modules', '.git', 'venv', 'dist', 'code-docs'], rootDir) {
+    let results = [];
+    // Store the root directory on first call
+    const rootPath = rootDir || dir;
+    try {
+        const files = fs.readdirSync(dir);
+        for (const file of files) {
+            // Skip ignored directories
+            if (ignoreDirs.includes(file))
+                continue;
+            // Create the full path
+            const fullPath = path.join(dir, file);
+            try {
+                const stats = fs.statSync(fullPath);
+                if (stats.isDirectory()) {
+                    // Recurse for directories - pass rootPath to nested calls
+                    const subResults = await getFilesRecursively(fullPath, ignoreDirs, rootPath);
+                    results = results.concat(subResults);
+                }
+                else {
+                    // Add file to results - using normalized paths for Windows compatibility
+                    // Replace backslashes with forward slashes for consistency
+                    let relativePath = path.relative(rootPath, fullPath);
+                    relativePath = relativePath.replace(/\\/g, '/');
+                    results.push(relativePath);
+                }
+            }
+            catch (err) {
+                outputChannel.appendLine(`Error processing ${fullPath}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+        }
+    }
+    catch (err) {
+        outputChannel.appendLine(`Error reading directory ${dir}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return results;
+}
 async function generateFileStructure(rootPath, docsFolder) {
     return new Promise((resolve) => {
-        // Use a more thorough command that includes file types and sizes
-        (0, child_process_1.exec)('find . -type f -not -path "*/\\.*" -not -path "*/node_modules/*" -not -path "*/venv/*" | sort | xargs ls -la 2>/dev/null', { cwd: rootPath }, async (error, stdout, stderr) => {
-            if (error) {
-                outputChannel.appendLine(`Error generating file structure: ${error.message}`);
-                vscode.window.showErrorMessage(`Error generating file structure: ${error.message}`);
-                resolve();
+        const isWindows = process.platform === 'win32';
+        // Improved Windows command with proper escaping
+        const command = isWindows ?
+            'powershell.exe -Command "Get-ChildItem -Path . -Recurse -File | Where-Object { $_.FullName -notlike \'*\\node_modules\\*\' -and $_.FullName -notlike \'*\\.git\\*\' -and $_.FullName -notlike \'*\\venv\\*\' } | Select-Object -Property FullName | ForEach-Object { $_.FullName }"' :
+            'find . -type f -not -path "*/\\.*" -not -path "*/node_modules/*" -not -path "*/venv/*" | sort | xargs ls -la 2>/dev/null';
+        outputChannel.appendLine(`Executing command: ${command}`);
+        (0, child_process_1.exec)(command, { cwd: rootPath }, async (error, stdout, stderr) => {
+            // If command fails, always use the fallback approach on Windows
+            if (error || (isWindows && !stdout.trim())) {
+                outputChannel.appendLine(`Using fallback file system approach...`);
+                if (error) {
+                    outputChannel.appendLine(`Command error: ${error.message}`);
+                }
+                try {
+                    // Use file system directly
+                    const fileList = await getFilesRecursively(rootPath, ['node_modules', '.git', 'venv', 'dist', 'code-docs'], rootPath);
+                    // For debugging, log the first few files found
+                    outputChannel.appendLine(`Files found (first 5): ${fileList.slice(0, 5).join(', ')}`);
+                    const fileStructure = fileList.join('\n');
+                    // Create a project manifest
+                    const projectManifest = {
+                        rootPath: rootPath,
+                        packageJson: await getPackageJson(rootPath),
+                        fileCount: fileList.length,
+                        timestamp: new Date().toISOString()
+                    };
+                    // Enhanced prompt with project context
+                    const prompt = `Create a comprehensive file structure documentation from this list of files in the project.
+Organize it logically, explain the purpose of main directories, and highlight important files.
+Project context: ${JSON.stringify(projectManifest)}
+File list:
+${fileStructure}`;
+                    outputChannel.appendLine('Generating documentation from collected files...');
+                    const documentation = await generateWithGemini(prompt);
+                    fs.writeFileSync(path.join(docsFolder, 'file-structure.md'), documentation);
+                    // Save the manifest for future reference
+                    fs.writeFileSync(path.join(docsFolder, 'project-manifest.json'), JSON.stringify(projectManifest, null, 2));
+                    outputChannel.appendLine('File structure documentation generated successfully.');
+                    resolve();
+                }
+                catch (err) {
+                    outputChannel.appendLine(`Error with fallback approach: ${err instanceof Error ? err.message : String(err)}`);
+                    vscode.window.showErrorMessage(`Error generating file structure: ${err instanceof Error ? err.message : String(err)}`);
+                    resolve();
+                }
                 return;
             }
+            // Process command output if successful
             const fileList = stdout.split('\n').filter(file => file.trim() !== '');
             const fileStructure = fileList.join('\n');
-            // Create a project manifest to provide better context
+            // Continue with project manifest and doc generation
             const projectManifest = {
                 rootPath: rootPath,
                 packageJson: await getPackageJson(rootPath),
                 fileCount: fileList.length,
                 timestamp: new Date().toISOString()
             };
-            // Enhanced prompt with project context
+            // Define the prompt here as well - THIS WAS MISSING
             const prompt = `Create a comprehensive file structure documentation from this list of files in the project.
 Organize it logically, explain the purpose of main directories, and highlight important files.
 Project context: ${JSON.stringify(projectManifest)}
@@ -266,7 +343,6 @@ ${fileStructure}`;
             try {
                 const documentation = await generateWithGemini(prompt);
                 fs.writeFileSync(path.join(docsFolder, 'file-structure.md'), documentation);
-                // Save the manifest for future reference
                 fs.writeFileSync(path.join(docsFolder, 'project-manifest.json'), JSON.stringify(projectManifest, null, 2));
                 resolve();
             }
@@ -297,156 +373,179 @@ async function generateFileRelationships(rootPath, docsFolder) {
     const dependencyMap = new Map();
     const reverseMap = new Map(); // who imports this file
     return new Promise((resolve) => {
-        // Use a more comprehensive approach to find imports
-        (0, child_process_1.exec)('find . -type f -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" -o -name "*.py" -o -name "*.java" -o -name "*.go" | grep -v "node_modules\\|venv\\|dist" | sort', { cwd: rootPath }, async (error, stdout, stderr) => {
-            let fileRelations = "# File Relationships\n\n";
-            if (!error) {
-                const files = stdout.split('\n').filter(file => file.trim() !== '');
-                for (const file of files) {
-                    if (file.includes('node_modules/') || file.includes('venv/'))
-                        continue;
-                    try {
-                        const content = fs.readFileSync(path.join(rootPath, file), 'utf8');
-                        const fileExt = path.extname(file);
-                        // Initialize sets if not exist
-                        if (!dependencyMap.has(file)) {
-                            dependencyMap.set(file, new Set());
-                        }
-                        // Use language-specific regex patterns based on file extension
-                        const imports = extractImports(content, fileExt);
-                        // Map relative imports to actual file paths
-                        for (const imp of imports) {
-                            if (imp.startsWith('.')) {
-                                const importedFile = resolveRelativeImport(file, imp, rootPath);
-                                if (importedFile) {
-                                    dependencyMap.get(file).add(importedFile);
-                                    // Update reverse map
-                                    if (!reverseMap.has(importedFile)) {
-                                        reverseMap.set(importedFile, new Set());
-                                    }
-                                    reverseMap.get(importedFile).add(file);
-                                }
-                            }
-                            else {
-                                dependencyMap.get(file).add(imp);
-                            }
-                        }
-                    }
-                    catch (err) {
-                        outputChannel.appendLine(`Error analyzing imports in ${file}: ${err instanceof Error ? err.message : String(err)}`);
-                    }
+        const isWindows = process.platform === 'win32';
+        const extensions = ['js', 'ts', 'jsx', 'tsx', 'py', 'java', 'go'];
+        // Skip command execution on Windows and use direct file system approach
+        if (isWindows) {
+            outputChannel.appendLine('Using direct file system approach for relationships on Windows...');
+            processFilesForRelationships();
+        }
+        else {
+            const command = `find . -type f \\( ${extensions.map(ext => `-name "*.${ext}"`).join(' -o ')} \\) | grep -v "node_modules\\|venv\\|dist" | sort`;
+            outputChannel.appendLine(`Executing relationship command: ${command}`);
+            (0, child_process_1.exec)(command, { cwd: rootPath }, (error, stdout) => {
+                if (error) {
+                    outputChannel.appendLine(`Error with command: ${error.message}`);
+                    processFilesForRelationships();
+                    return;
                 }
-                // Generate a more detailed relationship documentation
-                fileRelations += "## Direct Dependencies\n\n";
-                for (const [file, deps] of dependencyMap.entries()) {
-                    if (deps.size > 0) {
-                        fileRelations += `### ${file}\n\nThis file depends on:\n`;
-                        [...deps].forEach(dep => {
-                            fileRelations += `- ${dep}\n`;
-                        });
-                        fileRelations += "\n";
-                    }
-                }
-                fileRelations += "## Reverse Dependencies\n\n";
-                for (const [file, deps] of reverseMap.entries()) {
-                    if (deps.size > 0) {
-                        fileRelations += `### ${file}\n\nThis file is imported by:\n`;
-                        [...deps].forEach(dep => {
-                            fileRelations += `- ${dep}\n`;
-                        });
-                        fileRelations += "\n";
-                    }
-                }
-            }
-            // Save the raw relationship data for use in individual file docs
-            fs.writeFileSync(path.join(docsFolder, 'relationships-data.json'), JSON.stringify({
-                dependencies: [...dependencyMap.entries()].map(([file, deps]) => ({ file, deps: [...deps] })),
-                reverseDeps: [...reverseMap.entries()].map(([file, deps]) => ({ file, deps: [...deps] }))
-            }, null, 2));
-            // Generate comprehensive documentation with Gemini
-            const prompt = `Analyze these file relationships and create a comprehensive documentation that explains the architecture and dependencies between files. 
-Include sections about key components, architectural patterns, and highlight central files based on their number of dependencies:
-
-${fileRelations}`;
+                const files = stdout.split('\n')
+                    .filter(file => file.trim() !== '')
+                    .map(file => file.replace(/^\.[\\/]/, ''));
+                processRelationships(files);
+            });
+        }
+        // Helper function to process files using Node.js file system
+        async function processFilesForRelationships() {
             try {
-                const documentation = await generateWithGemini(prompt);
-                fs.writeFileSync(path.join(docsFolder, 'file-relationships.md'), documentation);
-                resolve();
+                const files = (await getFilesRecursively(rootPath, ['node_modules', '.git', 'venv', 'dist', 'code-docs'], rootPath))
+                    .filter(file => extensions.includes(path.extname(file).substring(1)));
+                processRelationships(files);
             }
             catch (err) {
-                outputChannel.appendLine(`Error with Gemini API: ${err instanceof Error ? err.message : String(err)}`);
-                vscode.window.showErrorMessage(`Error with Gemini API: ${err instanceof Error ? err.message : String(err)}`);
-                fs.writeFileSync(path.join(docsFolder, 'file-relationships.md'), fileRelations);
+                outputChannel.appendLine(`Error getting files: ${err instanceof Error ? err.message : String(err)}`);
                 resolve();
             }
-        });
+        }
+        // Process the file relationships
+        function processRelationships(files) {
+            // Implement the actual relationship building here
+            outputChannel.appendLine(`Processing relationships for ${files.length} files...`);
+            // Process each file to extract imports
+            for (const file of files) {
+                try {
+                    const fullPath = path.join(rootPath, file);
+                    // Skip if file doesn't exist (might have been deleted/moved)
+                    if (!fs.existsSync(fullPath)) {
+                        continue;
+                    }
+                    // Read file content
+                    const content = fs.readFileSync(fullPath, 'utf8');
+                    const fileExt = path.extname(file);
+                    // Initialize the dependency set for this file
+                    if (!dependencyMap.has(file)) {
+                        dependencyMap.set(file, new Set());
+                    }
+                    // Extract imports from this file
+                    const imports = extractImports(content, fileExt);
+                    // For each import, try to resolve it to an actual file
+                    for (const imp of imports) {
+                        if (imp.startsWith('.')) {
+                            // This is a relative import, try to resolve it
+                            const resolvedImport = resolveRelativeImport(file, imp, rootPath);
+                            if (resolvedImport) {
+                                // Add to dependency map
+                                dependencyMap.get(file).add(resolvedImport);
+                                // Also update reverse map
+                                if (!reverseMap.has(resolvedImport)) {
+                                    reverseMap.set(resolvedImport, new Set());
+                                }
+                                reverseMap.get(resolvedImport).add(file);
+                            }
+                        }
+                        else {
+                            // This is an external/package import
+                            dependencyMap.get(file).add(imp);
+                        }
+                    }
+                }
+                catch (err) {
+                    outputChannel.appendLine(`Error processing file ${file}: ${err instanceof Error ? err.message : String(err)}`);
+                }
+            }
+            // Create documentation from the relationship maps
+            let fileRelations = "# File Relationships\n\n";
+            // Generate direct dependencies documentation
+            fileRelations += "## Direct Dependencies\n\n";
+            for (const [file, deps] of dependencyMap.entries()) {
+                if (deps.size > 0) {
+                    fileRelations += `### ${file}\n\nThis file depends on:\n`;
+                    [...deps].forEach(dep => {
+                        fileRelations += `- ${dep}\n`;
+                    });
+                    fileRelations += "\n";
+                }
+            }
+            // Generate reverse dependencies documentation
+            fileRelations += "## Reverse Dependencies\n\n";
+            for (const [file, deps] of reverseMap.entries()) {
+                if (deps.size > 0) {
+                    fileRelations += `### ${file}\n\nThis file is imported by:\n`;
+                    [...deps].forEach(dep => {
+                        fileRelations += `- ${dep}\n`;
+                    });
+                    fileRelations += "\n";
+                }
+            }
+            // Save relationship data for use in file documentation
+            try {
+                const relationshipData = {
+                    dependencies: [...dependencyMap.entries()].map(([file, deps]) => ({
+                        file,
+                        deps: [...deps]
+                    })),
+                    reverseDeps: [...reverseMap.entries()].map(([file, deps]) => ({
+                        file,
+                        deps: [...deps]
+                    }))
+                };
+                fs.writeFileSync(path.join(docsFolder, 'relationships-data.json'), JSON.stringify(relationshipData, null, 2));
+            }
+            catch (err) {
+                outputChannel.appendLine(`Error saving relationship data: ${err instanceof Error ? err.message : String(err)}`);
+            }
+            // Generate a comprehensive documentation with Gemini
+            const prompt = `Analyze these file relationships and create a comprehensive documentation that explains:
+1. The overall architecture of the project
+2. Key components and their responsibilities 
+3. The main dependency flows between files
+4. Any architectural patterns detected from these relationships
+
+Here is the dependency information:
+
+${fileRelations}`;
+            generateWithGemini(prompt)
+                .then(documentation => {
+                fs.writeFileSync(path.join(docsFolder, 'file-relationships.md'), documentation);
+                outputChannel.appendLine('File relationships documentation generated successfully.');
+                resolve();
+            })
+                .catch(err => {
+                outputChannel.appendLine(`Error generating AI documentation: ${err.message}`);
+                // Fallback to the basic documentation if AI fails
+                fs.writeFileSync(path.join(docsFolder, 'file-relationships.md'), fileRelations);
+                outputChannel.appendLine('Basic file relationships documentation saved as fallback.');
+                resolve();
+            });
+        }
     });
-}
-// Helper function to extract imports based on file type
-function extractImports(content, fileExt) {
-    const imports = [];
-    // JavaScript/TypeScript
-    if (['.js', '.ts', '.jsx', '.tsx'].includes(fileExt)) {
-        const importRegex = /import\s+.*?from\s+['"](.+?)['"]|require\s*\(\s*['"](.+?)['"]\s*\)/g;
-        let match;
-        while ((match = importRegex.exec(content)) !== null) {
-            const importPath = match[1] || match[2];
-            if (importPath) {
-                imports.push(importPath);
-            }
-        }
-    }
-    // Python
-    else if (fileExt === '.py') {
-        const importRegex = /(?:from\s+(\S+)\s+import|import\s+(\S+))/g;
-        let match;
-        while ((match = importRegex.exec(content)) !== null) {
-            const importPath = match[1] || match[2];
-            if (importPath) {
-                imports.push(importPath);
-            }
-        }
-    }
-    // Add more language support as needed
-    return imports;
-}
-// Helper function to resolve relative imports to full paths
-function resolveRelativeImport(sourceFile, importPath, rootPath) {
-    try {
-        const sourceDir = path.dirname(sourceFile);
-        let fullPath = path.join(sourceDir, importPath);
-        // Handle extensions
-        if (!path.extname(fullPath)) {
-            const extensions = ['.js', '.ts', '.jsx', '.tsx', '.py', '.java', '.go'];
-            for (const ext of extensions) {
-                if (fs.existsSync(path.join(rootPath, fullPath + ext))) {
-                    return fullPath + ext;
-                }
-            }
-            // Check for index files
-            for (const ext of extensions) {
-                if (fs.existsSync(path.join(rootPath, fullPath, 'index' + ext))) {
-                    return path.join(fullPath, 'index' + ext);
-                }
-            }
-        }
-        return fullPath;
-    }
-    catch (err) {
-        outputChannel.appendLine(`Error resolving import ${importPath} in ${sourceFile}: ${err instanceof Error ? err.message : String(err)}`);
-        return null;
-    }
 }
 async function generateIndividualDocs(rootPath, docsFolder) {
     return new Promise((resolve) => {
-        (0, child_process_1.exec)('find . -type f -not -path "*/\\.*" -not -path "*/node_modules/*" -not -path "*/venv/*" -not -path "*/code-docs/*" | sort', { cwd: rootPath }, async (error, stdout, stderr) => {
+        const isWindows = process.platform === 'win32';
+        const command = isWindows ?
+            'powershell -Command "Get-ChildItem -Path . -Recurse -File | Where-Object { $_.FullName -notlike \'*\\node_modules\\*\' -and $_.FullName -notlike \'*\\.git\\*\' -and $_.FullName -notlike \'*\\venv\\*\' -and $_.FullName -notlike \'*\\code-docs\\*\' } | Select-Object -ExpandProperty FullName"' :
+            'find . -type f -not -path "*/\\.*" -not -path "*/node_modules/*" -not -path "*/venv/*" -not -path "*/code-docs/*" | sort';
+        (0, child_process_1.exec)(command, { cwd: rootPath }, async (error, stdout, stderr) => {
+            let files = [];
             if (error) {
                 outputChannel.appendLine(`Error finding files: ${error.message}`);
-                vscode.window.showErrorMessage(`Error finding files: ${error.message}`);
-                resolve();
-                return;
+                vscode.window.showInformationMessage('Using fallback file discovery method...');
+                try {
+                    files = await getFilesRecursively(rootPath, ['node_modules', '.git', 'venv', 'dist', 'code-docs'], rootPath);
+                }
+                catch (err) {
+                    outputChannel.appendLine(`Fallback failed: ${err instanceof Error ? err.message : String(err)}`);
+                    vscode.window.showErrorMessage(`Error finding files: ${err instanceof Error ? err.message : String(err)}`);
+                    resolve();
+                    return;
+                }
             }
-            const files = stdout.split('\n').filter(file => file.trim() !== '');
+            else {
+                files = stdout.split('\n')
+                    .filter(file => file.trim() !== '')
+                    .map(file => file.replace(/^\.[\\/]/, '')); // Remove ./ or .\ prefix
+            }
             const individualDocsFolder = path.join(docsFolder, 'files');
             if (!fs.existsSync(individualDocsFolder)) {
                 fs.mkdirSync(individualDocsFolder);
@@ -618,11 +717,23 @@ async function generateWithGemini(prompt) {
     try {
         outputChannel.appendLine('Calling Gemini API...');
         const response = await axios_1.default.post('https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent', {
-            contents: [{ parts: [{ text: prompt }] }],
+            contents: [{
+                    parts: [{
+                            text: prompt + "\n\nPlease format your response as markdown with appropriate headings, code blocks with syntax highlighting, and well-structured sections. Focus on accuracy and thoroughness in your analysis."
+                        }]
+                }],
             generationConfig: {
-                temperature: 0.2,
-                maxOutputTokens: 8192
-            }
+                temperature: 0.1, // Lower temperature for more accurate/consistent results
+                maxOutputTokens: 8192,
+                topP: 0.95,
+                topK: 40
+            },
+            safetySettings: [
+                {
+                    category: "HARM_CATEGORY_DANGEROUS_CONTENT",
+                    threshold: "BLOCK_MEDIUM_AND_ABOVE"
+                }
+            ]
         }, {
             headers: {
                 'Content-Type': 'application/json',
@@ -647,4 +758,124 @@ async function generateWithGemini(prompt) {
     }
 }
 function deactivate() { }
+function extractImports(content, fileExt) {
+    const imports = [];
+    try {
+        // JavaScript/TypeScript
+        if (['.js', '.ts', '.jsx', '.tsx'].includes(fileExt)) {
+            // Match ES6 imports
+            const es6ImportRegex = /import\s+(?:(?:{[^}]*}|\*(?:\s+as\s+\w+)?|\w+)\s+from\s+)?['"]([^'"]+)['"]/g;
+            let match;
+            while ((match = es6ImportRegex.exec(content)) !== null) {
+                if (match[1])
+                    imports.push(match[1]);
+            }
+            // Match CommonJS requires
+            const requireRegex = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+            while ((match = requireRegex.exec(content)) !== null) {
+                if (match[1])
+                    imports.push(match[1]);
+            }
+        }
+        // Python
+        else if (fileExt === '.py') {
+            // Match Python imports
+            const importFromRegex = /from\s+([^\s]+)\s+import/g;
+            let match;
+            while ((match = importFromRegex.exec(content)) !== null) {
+                if (match[1])
+                    imports.push(match[1]);
+            }
+            const importRegex = /import\s+([^\s,]+)/g;
+            while ((match = importRegex.exec(content)) !== null) {
+                if (match[1])
+                    imports.push(match[1]);
+            }
+        }
+        // Java
+        else if (fileExt === '.java') {
+            // Match Java imports
+            const importRegex = /import\s+([^;]+);/g;
+            let match;
+            while ((match = importRegex.exec(content)) !== null) {
+                if (match[1])
+                    imports.push(match[1]);
+            }
+        }
+        // Go
+        else if (fileExt === '.go') {
+            // Match Go imports
+            const importRegex = /import\s+\(\s*((?:"[^"]+"\s*)+)\s*\)/g;
+            let match;
+            while ((match = importRegex.exec(content)) !== null) {
+                if (match[1]) {
+                    const importBlock = match[1];
+                    const individualImports = importBlock.match(/"([^"]+)"/g);
+                    if (individualImports) {
+                        individualImports.forEach(imp => {
+                            imports.push(imp.replace(/"/g, ''));
+                        });
+                    }
+                }
+            }
+            // Single-line imports
+            const singleImportRegex = /import\s+"([^"]+)"/g;
+            while ((match = singleImportRegex.exec(content)) !== null) {
+                if (match[1])
+                    imports.push(match[1]);
+            }
+        }
+    }
+    catch (err) {
+        outputChannel.appendLine(`Error extracting imports: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    return imports;
+}
+function resolveRelativeImport(sourceFile, importPath, rootPath) {
+    try {
+        // Get directory containing the source file
+        const sourceDir = path.dirname(sourceFile);
+        let resolvedPath = '';
+        // Handle relative imports
+        if (importPath.startsWith('.')) {
+            // Normalize to forward slashes for consistency
+            resolvedPath = path.normalize(path.join(sourceDir, importPath)).replace(/\\/g, '/');
+        }
+        else {
+            // For non-relative imports, just return as is
+            return importPath;
+        }
+        // Remove file extension if present
+        const ext = path.extname(resolvedPath);
+        if (ext) {
+            // If it already has an extension, check if the file exists
+            const fullPath = path.join(rootPath, resolvedPath);
+            if (fs.existsSync(fullPath)) {
+                return resolvedPath;
+            }
+        }
+        // Try common extensions if no extension or file not found
+        const extensions = ['.js', '.ts', '.jsx', '.tsx', '.py', '.java', '.go'];
+        for (const ext of extensions) {
+            const fullPath = path.join(rootPath, resolvedPath + ext);
+            if (fs.existsSync(fullPath)) {
+                return (resolvedPath + ext).replace(/\\/g, '/');
+            }
+        }
+        // Handle index files in directories
+        for (const ext of extensions) {
+            const indexPath = path.join(resolvedPath, 'index' + ext);
+            const fullPath = path.join(rootPath, indexPath);
+            if (fs.existsSync(fullPath)) {
+                return indexPath.replace(/\\/g, '/');
+            }
+        }
+        // If we can't resolve it exactly, just return the normalized path
+        return resolvedPath;
+    }
+    catch (err) {
+        outputChannel.appendLine(`Error resolving import ${importPath} in ${sourceFile}: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+    }
+}
 //# sourceMappingURL=extension.js.map
