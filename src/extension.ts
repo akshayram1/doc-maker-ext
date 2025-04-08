@@ -236,71 +236,100 @@ async function getChangedFiles(rootPath: string): Promise<string[]> {
                 .filter(file => file.trim() !== '')
                 .filter(file => !file.includes('node_modules/') &&
                     !file.includes('venv/') &&
-                    !file.includes('.env'));
+                    !file.includes('.env') &&
+                    !file.includes('docker/') &&
+                    !/Dockerfile$|docker-compose\.ya?ml$|\.dockerfile$/i.test(file));
             resolve(files);
         });
     });
 }
 
 async function generateFileStructure(rootPath: string, docsFolder: string): Promise<void> {
-    return new Promise((resolve) => {
-        // Use a more thorough command that includes file types and sizes
-        exec('find . -type f -not -path "*/\\.*" -not -path "*/node_modules/*" -not -path "*/venv/*" | sort | xargs ls -la 2>/dev/null',
-            { cwd: rootPath },
-            async (error, stdout, stderr) => {
-                if (error) {
-                    outputChannel.appendLine(`Error generating file structure: ${error.message}`);
-                    vscode.window.showErrorMessage(`Error generating file structure: ${error.message}`);
-                    resolve();
-                    return;
-                }
+    try {
+        outputChannel.appendLine('Generating file structure documentation using Node.js fs...');
+        
+        // Use a recursive function to build file list instead of shell commands
+        const fileList: string[] = [];
+        await walkDir(rootPath, fileList, rootPath, [
+            'node_modules', 'venv', '.git', 'dist', 'out', 'code-docs'
+        ]);
+        
+        // Create a project manifest to provide better context
+        const projectManifest = {
+            rootPath: rootPath,
+            packageJson: await getPackageJson(rootPath),
+            fileCount: fileList.length,
+            timestamp: new Date().toISOString()
+        };
 
-                const fileList = stdout.split('\n').filter(file => file.trim() !== '');
-                const fileStructure = fileList.join('\n');
-
-                // Create a project manifest to provide better context
-                const projectManifest = {
-                    rootPath: rootPath,
-                    packageJson: await getPackageJson(rootPath),
-                    fileCount: fileList.length,
-                    timestamp: new Date().toISOString()
-                };
-
-                // Enhanced prompt with project context
-                const prompt = `Create a comprehensive file structure documentation from this list of files in the project.
+        // Enhanced prompt with project context
+        const prompt = `Create a comprehensive file structure documentation from this list of files in the project.
 Organize it logically, explain the purpose of main directories, and highlight important files.
 Project context: ${JSON.stringify(projectManifest)}
 File list:
-${fileStructure}`;
+${fileList.join('\n')}`;
 
-                try {
-                    const documentation = await generateWithGemini(prompt);
-                    fs.writeFileSync(path.join(docsFolder, 'file-structure.md'), documentation);
-                    // Save the manifest for future reference
-                    fs.writeFileSync(path.join(docsFolder, 'project-manifest.json'), JSON.stringify(projectManifest, null, 2));
-                    resolve();
-                } catch (err) {
-                    outputChannel.appendLine(`Error with Gemini API: ${err instanceof Error ? err.message : String(err)}`);
-                    vscode.window.showErrorMessage(`Error with Gemini API: ${err instanceof Error ? err.message : String(err)}`);
-                    resolve();
-                }
-            }
-        );
-    });
+        try {
+            const documentation = await generateWithGemini(prompt);
+            fs.writeFileSync(path.join(docsFolder, 'file-structure.md'), documentation);
+            // Save the manifest for future reference
+            fs.writeFileSync(path.join(docsFolder, 'project-manifest.json'), JSON.stringify(projectManifest, null, 2));
+            outputChannel.appendLine('File structure documentation generated successfully');
+        } catch (err) {
+            outputChannel.appendLine(`Error with Gemini API: ${err instanceof Error ? err.message : String(err)}`);
+            vscode.window.showErrorMessage(`Error with Gemini API: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    } catch (error) {
+        outputChannel.appendLine(`Error generating file structure: ${error instanceof Error ? error.message : String(error)}`);
+        vscode.window.showErrorMessage(`Error generating file structure: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    
+    return Promise.resolve();
 }
 
-// Add helper function to get package.json content
-async function getPackageJson(rootPath: string): Promise<any> {
-    try {
-        const packageJsonPath = path.join(rootPath, 'package.json');
-        if (fs.existsSync(packageJsonPath)) {
-            const content = fs.readFileSync(packageJsonPath, 'utf8');
-            return JSON.parse(content);
+// Helper function for recursively walking directories
+async function walkDir(dir: string, fileList: string[], rootPath: string, ignoreDirs: string[]): Promise<void> {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        const relativePath = path.relative(rootPath, fullPath).replace(/\\/g, '/'); // Normalize path separators
+
+        if (entry.isDirectory()) {
+            // Skip directories in the ignore list
+            if (ignoreDirs.includes(entry.name) || entry.name.startsWith('.')) {
+                continue;
+            }
+            await walkDir(fullPath, fileList, rootPath, ignoreDirs);
+        } else {
+            // Skip Docker files
+            if (entry.name === 'Dockerfile' ||
+                entry.name === 'docker-compose.yml' ||
+                entry.name === 'docker-compose.yaml' ||
+                entry.name.endsWith('.dockerfile')) {
+                continue;
+            }
+
+            // Add the file to our list
+            fileList.push(relativePath);
+            try {
+                // @ts-ignore: Keeping for future file size features
+                const stats = fs.statSync(fullPath);
+                // Optionally add file size info
+                // fileList[fileList.length - 1] += ` (${formatFileSize(stats.size)})`;
+            } catch (err) {
+                // If stat fails, just use the filename
+            }
         }
-    } catch (err) {
-        outputChannel.appendLine(`Error reading package.json: ${err instanceof Error ? err.message : String(err)}`);
     }
-    return null;
+}
+
+// @ts-ignore: Keeping for future file size features
+function formatFileSize(bytes: number): string {
+    if (bytes < 1024) return bytes + ' B';
+    else if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+    else if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    else return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
 }
 
 async function generateFileRelationships(rootPath: string, docsFolder: string): Promise<void> {
@@ -310,7 +339,7 @@ async function generateFileRelationships(rootPath: string, docsFolder: string): 
 
     return new Promise((resolve) => {
         // Use a more comprehensive approach to find imports
-        exec('find . -type f -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" -o -name "*.py" -o -name "*.java" -o -name "*.go" | grep -v "node_modules\\|venv\\|dist" | sort',
+        exec('find . -type f -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" -o -name "*.py" -o -name "*.java" -o -name "*.go" | grep -v "node_modules\\|venv\\|dist\\|docker" | sort',
             { cwd: rootPath },
             async (error, stdout, stderr) => {
                 let fileRelations = "# File Relationships\n\n";
@@ -468,7 +497,7 @@ function resolveRelativeImport(sourceFile: string, importPath: string, rootPath:
 
 async function generateIndividualDocs(rootPath: string, docsFolder: string): Promise<void> {
     return new Promise((resolve) => {
-        exec('find . -type f -not -path "*/\\.*" -not -path "*/node_modules/*" -not -path "*/venv/*" -not -path "*/code-docs/*" | sort',
+        exec('find . -type f -not -path "*/\\.*" -not -path "*/node_modules/*" -not -path "*/venv/*" -not -path "*/code-docs/*" -not -path "*/docker/*" -not -name "Dockerfile" -not -name "docker-compose.yml" -not -name "docker-compose.yaml" -not -name "*.dockerfile" | sort',
             { cwd: rootPath },
             async (error, stdout, stderr) => {
                 if (error) {
@@ -485,11 +514,16 @@ async function generateIndividualDocs(rootPath: string, docsFolder: string): Pro
                     fs.mkdirSync(individualDocsFolder);
                 }
 
-                // Process files in batches to avoid overloading
-                const batchSize = 5;
-                for (let i = 0; i < files.length; i += batchSize) {
-                    const batch = files.slice(i, i + batchSize);
-                    await Promise.all(batch.map(file => documentSingleFile(rootPath, individualDocsFolder, file)));
+                // Process files sequentially one by one instead of in parallel batches
+                for (let i = 0; i < files.length; i++) {
+                    const file = files[i];
+                    outputChannel.appendLine(`Processing file ${i+1}/${files.length}: ${file}`);
+                    
+                    // Show progress notification
+                    vscode.window.showInformationMessage(`Documenting file ${i+1}/${files.length}: ${file}`);
+                    
+                    // Process one file at a time
+                    await documentSingleFile(rootPath, individualDocsFolder, file);
                 }
 
                 resolve();
@@ -505,11 +539,16 @@ async function updateFileDocs(rootPath: string, docsFolder: string, changedFiles
         fs.mkdirSync(individualDocsFolder);
     }
 
-    // Process files in batches
-    const batchSize = 5;
-    for (let i = 0; i < changedFiles.length; i += batchSize) {
-        const batch = changedFiles.slice(i, i + batchSize);
-        await Promise.all(batch.map(file => documentSingleFile(rootPath, individualDocsFolder, file)));
+    // Process files sequentially
+    for (let i = 0; i < changedFiles.length; i++) {
+        const file = changedFiles[i];
+        outputChannel.appendLine(`Updating documentation for file ${i+1}/${changedFiles.length}: ${file}`);
+        
+        // Show progress notification
+        vscode.window.showInformationMessage(`Updating documentation for file ${i+1}/${changedFiles.length}: ${file}`);
+        
+        // Process one file at a time
+        await documentSingleFile(rootPath, individualDocsFolder, file);
     }
 }
 
@@ -576,7 +615,7 @@ async function documentSingleFile(rootPath: string, docsFolder: string, filePath
 3. Important variables/state/props
 4. Overall architecture and code flow
 5. Usage examples and intended use cases
-6. Dependencies and imports analysis
+6. Dependencies and imports analysisit sho
 7. Any notable algorithms, patterns or design decisions
 
 File path: ${filePath}
@@ -710,3 +749,18 @@ async function generateWithGemini(prompt: string): Promise<string> {
 }
 
 export function deactivate(): void { }
+
+function getPackageJson(rootPath: string): any {
+    try {
+        const packageJsonPath = path.join(rootPath, 'package.json');
+        if (fs.existsSync(packageJsonPath)) {
+            const content = fs.readFileSync(packageJsonPath, 'utf8');
+            return JSON.parse(content);
+        }
+        return null;
+    } catch (error) {
+        outputChannel.appendLine(`Error reading package.json: ${error instanceof Error ? error.message : String(error)}`);
+        return null;
+    }
+}
+

@@ -1,8 +1,10 @@
 {
+  "rootPath": "e:\\QED42\\doc-extension",
+  "packageJson": {
     "name": "documentation-maker",
     "displayName": "Documentation Maker",
     "description": "AI-powered documentation generator for your code using ai",
-    "version": "0.2.8",
+    "version": "0.2.6",
     "publisher": "akshaychame",
     "author": {
       "name": "Akshay Chame"
@@ -126,4 +128,7 @@
       "@typescript-eslint/parser": "^5.62.0",
       "vsce": "^2.15.0"
     }
-  }
+  },
+  "fileCount": 11,
+  "timestamp": "2025-04-08T10:58:49.789Z"
+}
