@@ -2,128 +2,129 @@
     "name": "documentation-maker",
     "displayName": "Documentation Maker",
     "description": "AI-powered documentation generator for your code using AI",
-    "version": "0.2.3",
+    "version": "0.2.4",
     "publisher": "akshaychame",
     "author": {
-      "name": "Akshay Chame"
+        "name": "Akshay Chame"
     },
     "repository": {
-      "type": "git",
-      "url": "https://github.com/akshayram1/doc-maker-ext"
+        "type": "git",
+        "url": "https://github.com/akshayram1/doc-maker-ext"
     },
     "icon": "pngegg.png",
     "galleryBanner": {
-      "color": "#1E3D58",
-      "theme": "dark"
+        "color": "#1E3D58",
+        "theme": "dark"
     },
     "engines": {
-      "vscode": "^1.60.0"
+        "vscode": "^1.60.0"
     },
     "categories": [
-      "Other",
-      "Programming Languages",
-      "Formatters",
-      "Snippets"
+        "Other",
+        "Programming Languages",
+        "Formatters",
+        "Snippets"
     ],
     "keywords": [
-      "documentation",
-      "AI",
-      "Gemini",
-      "auto-docs",
-      "code documentation"
+        "documentation",
+        "AI",
+        "Gemini",
+        "auto-docs",
+        "code documentation"
     ],
     "activationEvents": [
-      "onStartupFinished"
+        "onStartupFinished"
     ],
     "main": "./out/extension.js",
     "contributes": {
-      "commands": [
-        {
-          "command": "doc-maker.initialSetup",
-          "title": "Documentation Maker: Initial Setup",
-          "category": "Documentation Maker"
+        "commands": [
+            {
+                "command": "doc-maker.initialSetup",
+                "title": "Documentation Maker: Initial Setup",
+                "category": "Documentation Maker"
+            },
+            {
+                "command": "doc-maker.updateDocs",
+                "title": "Documentation Maker: Update Documentation",
+                "category": "Documentation Maker"
+            }
+        ],
+        "keybindings": [
+            {
+                "command": "doc-maker.initialSetup",
+                "key": "ctrl+alt+d i",
+                "mac": "cmd+alt+d i",
+                "when": "editorFocus"
+            },
+            {
+                "command": "doc-maker.updateDocs",
+                "key": "ctrl+alt+d u",
+                "mac": "cmd+alt+d u",
+                "when": "editorFocus"
+            }
+        ],
+        "configuration": {
+            "title": "Documentation Maker",
+            "properties": {
+                "doc-maker.geminiApiKey": {
+                    "type": "string",
+                    "default": "",
+                    "description": "API Key for Gemini 1.5 Pro"
+                },
+                "doc-maker.outputDirectory": {
+                    "type": "string",
+                    "default": "code-docs",
+                    "description": "Directory name where documentation will be stored"
+                },
+                "doc-maker.excludePatterns": {
+                    "type": "array",
+                    "default": [
+                        "**/node_modules/**",
+                        "**/venv/**",
+                        "**/.git/**",
+                        "**/dist/**",
+                        "**/out/**"
+                    ],
+                    "description": "Patterns to exclude from documentation generation"
+                }
+            }
         },
-        {
-          "command": "doc-maker.updateDocs",
-          "title": "Documentation Maker: Update Documentation",
-          "category": "Documentation Maker"
+        "menus": {
+            "commandPalette": [
+                {
+                    "command": "doc-maker.initialSetup",
+                    "when": "workspaceHasPackageJSON || workbenchState == 'folder'"
+                },
+                {
+                    "command": "doc-maker.updateDocs",
+                    "when": "workspaceHasPackageJSON || workbenchState == 'folder'"
+                }
+            ]
         }
-      ],
-      "keybindings": [
-        {
-          "command": "doc-maker.initialSetup",
-          "key": "ctrl+alt+d i",
-          "mac": "cmd+alt+d i",
-          "when": "editorFocus"
-        },
-        {
-          "command": "doc-maker.updateDocs",
-          "key": "ctrl+alt+d u",
-          "mac": "cmd+alt+d u",
-          "when": "editorFocus"
-        }
-      ],
-      "configuration": {
-        "title": "Documentation Maker",
-        "properties": {
-          "doc-maker.geminiApiKey": {
-            "type": "string",
-            "default": "",
-            "description": "API Key for Gemini 1.5 Pro"
-          },
-          "doc-maker.outputDirectory": {
-            "type": "string",
-            "default": "code-docs",
-            "description": "Directory name where documentation will be stored"
-          },
-          "doc-maker.excludePatterns": {
-            "type": "array",
-            "default": [
-              "**/node_modules/**",
-              "**/venv/**",
-              "**/.git/**",
-              "**/dist/**",
-              "**/out/**"
-            ],
-            "description": "Patterns to exclude from documentation generation"
-          }
-        }
-      },
-      "menus": {
-        "commandPalette": [
-          {
-            "command": "doc-maker.initialSetup",
-            "when": "workspaceHasPackageJSON || workbenchState == 'folder'"
-          },
-          {
-            "command": "doc-maker.updateDocs",
-            "when": "workspaceHasPackageJSON || workbenchState == 'folder'"
-          }
-        ]
-      }
     },
     "scripts": {
-      "vscode:prepublish": "npm run compile",
-      "compile": "tsc -p ./",
-      "watch": "tsc -watch -p ./",
-      "lint": "eslint src --ext ts",
-      "pretest": "npm run compile && npm run lint",
-      "test": "node ./out/test/runTest.js",
-      "package": "vsce package",
-      "publish": "vsce publish"
+        "vscode:prepublish": "npm run compile",
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "lint": "eslint src --ext ts",
+        "pretest": "npm run compile && npm run lint",
+        "test": "node ./out/test/runTest.js",
+        "package": "vsce package",
+        "publish": "vsce publish"
     },
     "dependencies": {
-      "axios": "^1.6.3"
+        "axios": "^1.6.3",
+        "p-queue": "^8.1.0"
     },
     "devDependencies": {
-      "@types/vscode": "^1.60.0",
-      "@types/glob": "^7.1.3",
-      "@types/node": "16.x",
-      "eslint": "^8.47.0",
-      "glob": "^8.1.0",
-      "typescript": "^5.0.0",
-      "@typescript-eslint/eslint-plugin": "^5.62.0",
-      "@typescript-eslint/parser": "^5.62.0",
-      "vsce": "^2.15.0"
+        "@types/glob": "^7.1.3",
+        "@types/node": "16.x",
+        "@types/vscode": "^1.60.0",
+        "@typescript-eslint/eslint-plugin": "^5.62.0",
+        "@typescript-eslint/parser": "^5.62.0",
+        "eslint": "^8.47.0",
+        "glob": "^8.1.0",
+        "typescript": "^5.0.0",
+        "vsce": "^2.15.0"
     }
-  }
+}

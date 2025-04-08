@@ -3,9 +3,16 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { exec } from 'child_process';
 import axios from 'axios';
+import PQueue from 'p-queue';
 
 let geminiApiKey = '';
 let outputChannel: vscode.OutputChannel;
+
+// Create a request queue with concurrency limit
+const apiQueue = new PQueue({
+    concurrency: 1,
+    timeout: 60000
+});
 
 /**
  * This method is called when your extension is activated
@@ -245,17 +252,17 @@ async function getFilesRecursively(dir: string, ignoreDirs: string[] = ['node_mo
     let results: string[] = [];
     // Store the root directory on first call
     const rootPath = rootDir || dir;
-    
+
     try {
         const files = fs.readdirSync(dir);
-        
+
         for (const file of files) {
             // Skip ignored directories
             if (ignoreDirs.includes(file)) continue;
-            
+
             // Create the full path
             const fullPath = path.join(dir, file);
-            
+
             try {
                 const stats = fs.statSync(fullPath);
                 if (stats.isDirectory()) {
@@ -276,21 +283,21 @@ async function getFilesRecursively(dir: string, ignoreDirs: string[] = ['node_mo
     } catch (err) {
         outputChannel.appendLine(`Error reading directory ${dir}: ${err instanceof Error ? err.message : String(err)}`);
     }
-    
+
     return results;
 }
 
 async function generateFileStructure(rootPath: string, docsFolder: string): Promise<void> {
     return new Promise((resolve) => {
         const isWindows = process.platform === 'win32';
-        
+
         // Improved Windows command with proper escaping
         const command = isWindows ?
             'powershell.exe -Command "Get-ChildItem -Path . -Recurse -File | Where-Object { $_.FullName -notlike \'*\\node_modules\\*\' -and $_.FullName -notlike \'*\\.git\\*\' -and $_.FullName -notlike \'*\\venv\\*\' } | Select-Object -Property FullName | ForEach-Object { $_.FullName }"' :
             'find . -type f -not -path "*/\\.*" -not -path "*/node_modules/*" -not -path "*/venv/*" | sort | xargs ls -la 2>/dev/null';
-        
+
         outputChannel.appendLine(`Executing command: ${command}`);
-        
+
         exec(command, { cwd: rootPath }, async (error, stdout, stderr) => {
             // If command fails, always use the fallback approach on Windows
             if (error || (isWindows && !stdout.trim())) {
@@ -298,16 +305,16 @@ async function generateFileStructure(rootPath: string, docsFolder: string): Prom
                 if (error) {
                     outputChannel.appendLine(`Command error: ${error.message}`);
                 }
-                
+
                 try {
                     // Use file system directly
                     const fileList = await getFilesRecursively(rootPath, ['node_modules', '.git', 'venv', 'dist', 'code-docs'], rootPath);
-                    
+
                     // For debugging, log the first few files found
                     outputChannel.appendLine(`Files found (first 5): ${fileList.slice(0, 5).join(', ')}`);
-                    
+
                     const fileStructure = fileList.join('\n');
-                    
+
                     // Create a project manifest
                     const projectManifest = {
                         rootPath: rootPath,
@@ -315,14 +322,14 @@ async function generateFileStructure(rootPath: string, docsFolder: string): Prom
                         fileCount: fileList.length,
                         timestamp: new Date().toISOString()
                     };
-                    
+
                     // Enhanced prompt with project context
                     const prompt = `Create a comprehensive file structure documentation from this list of files in the project.
 Organize it logically, explain the purpose of main directories, and highlight important files.
 Project context: ${JSON.stringify(projectManifest)}
 File list:
 ${fileStructure}`;
-                    
+
                     outputChannel.appendLine('Generating documentation from collected files...');
                     const documentation = await generateWithGemini(prompt);
                     fs.writeFileSync(path.join(docsFolder, 'file-structure.md'), documentation);
@@ -341,7 +348,7 @@ ${fileStructure}`;
             // Process command output if successful
             const fileList = stdout.split('\n').filter(file => file.trim() !== '');
             const fileStructure = fileList.join('\n');
-            
+
             // Continue with project manifest and doc generation
             const projectManifest = {
                 rootPath: rootPath,
@@ -349,14 +356,14 @@ ${fileStructure}`;
                 fileCount: fileList.length,
                 timestamp: new Date().toISOString()
             };
-            
+
             // Define the prompt here as well - THIS WAS MISSING
             const prompt = `Create a comprehensive file structure documentation from this list of files in the project.
 Organize it logically, explain the purpose of main directories, and highlight important files.
 Project context: ${JSON.stringify(projectManifest)}
 File list:
 ${fileStructure}`;
-            
+
             try {
                 const documentation = await generateWithGemini(prompt);
                 fs.writeFileSync(path.join(docsFolder, 'file-structure.md'), documentation);
@@ -389,11 +396,11 @@ async function generateFileRelationships(rootPath: string, docsFolder: string): 
     // Create a file dependency map
     const dependencyMap = new Map<string, Set<string>>();
     const reverseMap = new Map<string, Set<string>>(); // who imports this file
-    
+
     return new Promise((resolve) => {
         const isWindows = process.platform === 'win32';
         const extensions = ['js', 'ts', 'jsx', 'tsx', 'py', 'java', 'go'];
-        
+
         // Skip command execution on Windows and use direct file system approach
         if (isWindows) {
             outputChannel.appendLine('Using direct file system approach for relationships on Windows...');
@@ -401,62 +408,62 @@ async function generateFileRelationships(rootPath: string, docsFolder: string): 
         } else {
             const command = `find . -type f \\( ${extensions.map(ext => `-name "*.${ext}"`).join(' -o ')} \\) | grep -v "node_modules\\|venv\\|dist" | sort`;
             outputChannel.appendLine(`Executing relationship command: ${command}`);
-            
+
             exec(command, { cwd: rootPath }, (error, stdout) => {
                 if (error) {
                     outputChannel.appendLine(`Error with command: ${error.message}`);
                     processFilesForRelationships();
                     return;
                 }
-                
+
                 const files = stdout.split('\n')
                     .filter(file => file.trim() !== '')
                     .map(file => file.replace(/^\.[\\/]/, ''));
-                
+
                 processRelationships(files);
             });
         }
-        
+
         // Helper function to process files using Node.js file system
         async function processFilesForRelationships() {
             try {
                 const files = (await getFilesRecursively(rootPath, ['node_modules', '.git', 'venv', 'dist', 'code-docs'], rootPath))
                     .filter(file => extensions.includes(path.extname(file).substring(1)));
-                
+
                 processRelationships(files);
             } catch (err) {
                 outputChannel.appendLine(`Error getting files: ${err instanceof Error ? err.message : String(err)}`);
                 resolve();
             }
         }
-        
+
         // Process the file relationships
         function processRelationships(files: string[]) {
             // Implement the actual relationship building here
             outputChannel.appendLine(`Processing relationships for ${files.length} files...`);
-            
+
             // Process each file to extract imports
             for (const file of files) {
                 try {
                     const fullPath = path.join(rootPath, file);
-                    
+
                     // Skip if file doesn't exist (might have been deleted/moved)
                     if (!fs.existsSync(fullPath)) {
                         continue;
                     }
-                    
+
                     // Read file content
                     const content = fs.readFileSync(fullPath, 'utf8');
                     const fileExt = path.extname(file);
-                    
+
                     // Initialize the dependency set for this file
                     if (!dependencyMap.has(file)) {
                         dependencyMap.set(file, new Set<string>());
                     }
-                    
+
                     // Extract imports from this file
                     const imports = extractImports(content, fileExt);
-                    
+
                     // For each import, try to resolve it to an actual file
                     for (const imp of imports) {
                         if (imp.startsWith('.')) {
@@ -465,7 +472,7 @@ async function generateFileRelationships(rootPath: string, docsFolder: string): 
                             if (resolvedImport) {
                                 // Add to dependency map
                                 dependencyMap.get(file)!.add(resolvedImport);
-                                
+
                                 // Also update reverse map
                                 if (!reverseMap.has(resolvedImport)) {
                                     reverseMap.set(resolvedImport, new Set<string>());
@@ -481,10 +488,10 @@ async function generateFileRelationships(rootPath: string, docsFolder: string): 
                     outputChannel.appendLine(`Error processing file ${file}: ${err instanceof Error ? err.message : String(err)}`);
                 }
             }
-            
+
             // Create documentation from the relationship maps
             let fileRelations = "# File Relationships\n\n";
-            
+
             // Generate direct dependencies documentation
             fileRelations += "## Direct Dependencies\n\n";
             for (const [file, deps] of dependencyMap.entries()) {
@@ -496,7 +503,7 @@ async function generateFileRelationships(rootPath: string, docsFolder: string): 
                     fileRelations += "\n";
                 }
             }
-            
+
             // Generate reverse dependencies documentation
             fileRelations += "## Reverse Dependencies\n\n";
             for (const [file, deps] of reverseMap.entries()) {
@@ -508,25 +515,25 @@ async function generateFileRelationships(rootPath: string, docsFolder: string): 
                     fileRelations += "\n";
                 }
             }
-            
+
             // Save relationship data for use in file documentation
             try {
                 const relationshipData = {
-                    dependencies: [...dependencyMap.entries()].map(([file, deps]) => ({ 
-                        file, 
-                        deps: [...deps] 
+                    dependencies: [...dependencyMap.entries()].map(([file, deps]) => ({
+                        file,
+                        deps: [...deps]
                     })),
-                    reverseDeps: [...reverseMap.entries()].map(([file, deps]) => ({ 
-                        file, 
-                        deps: [...deps] 
+                    reverseDeps: [...reverseMap.entries()].map(([file, deps]) => ({
+                        file,
+                        deps: [...deps]
                     }))
                 };
-                
+
                 fs.writeFileSync(path.join(docsFolder, 'relationships-data.json'), JSON.stringify(relationshipData, null, 2));
             } catch (err) {
                 outputChannel.appendLine(`Error saving relationship data: ${err instanceof Error ? err.message : String(err)}`);
             }
-            
+
             // Generate a comprehensive documentation with Gemini
             const prompt = `Analyze these file relationships and create a comprehensive documentation that explains:
 1. The overall architecture of the project
@@ -537,7 +544,7 @@ async function generateFileRelationships(rootPath: string, docsFolder: string): 
 Here is the dependency information:
 
 ${fileRelations}`;
-            
+
             generateWithGemini(prompt)
                 .then(documentation => {
                     fs.writeFileSync(path.join(docsFolder, 'file-relationships.md'), documentation);
@@ -561,14 +568,14 @@ async function generateIndividualDocs(rootPath: string, docsFolder: string): Pro
         const command = isWindows ?
             'powershell -Command "Get-ChildItem -Path . -Recurse -File | Where-Object { $_.FullName -notlike \'*\\node_modules\\*\' -and $_.FullName -notlike \'*\\.git\\*\' -and $_.FullName -notlike \'*\\venv\\*\' -and $_.FullName -notlike \'*\\code-docs\\*\' } | Select-Object -ExpandProperty FullName"' :
             'find . -type f -not -path "*/\\.*" -not -path "*/node_modules/*" -not -path "*/venv/*" -not -path "*/code-docs/*" | sort';
-        
+
         exec(command, { cwd: rootPath }, async (error, stdout, stderr) => {
             let files: string[] = [];
-            
+
             if (error) {
                 outputChannel.appendLine(`Error finding files: ${error.message}`);
                 vscode.window.showInformationMessage('Using fallback file discovery method...');
-                
+
                 try {
                     files = await getFilesRecursively(rootPath, ['node_modules', '.git', 'venv', 'dist', 'code-docs'], rootPath);
                 } catch (err) {
@@ -582,18 +589,22 @@ async function generateIndividualDocs(rootPath: string, docsFolder: string): Pro
                     .filter(file => file.trim() !== '')
                     .map(file => file.replace(/^\.[\\/]/, '')); // Remove ./ or .\ prefix
             }
-            
+
             const individualDocsFolder = path.join(docsFolder, 'files');
 
             if (!fs.existsSync(individualDocsFolder)) {
                 fs.mkdirSync(individualDocsFolder);
             }
 
-            // Process files in batches to avoid overloading
-            const batchSize = 5;
+            const batchSize = 1; // Change from 5 to 1
             for (let i = 0; i < files.length; i += batchSize) {
                 const batch = files.slice(i, i + batchSize);
-                await Promise.all(batch.map(file => documentSingleFile(rootPath, individualDocsFolder, file)));
+                // Process one at a time instead of using Promise.all
+                for (const file of batch) {
+                    await documentSingleFile(rootPath, individualDocsFolder, file);
+                    // Add a delay between files
+                    await delay(1000);
+                }
             }
 
             resolve();
@@ -608,11 +619,15 @@ async function updateFileDocs(rootPath: string, docsFolder: string, changedFiles
         fs.mkdirSync(individualDocsFolder);
     }
 
-    // Process files in batches
-    const batchSize = 5;
+    const batchSize = 1; // Change from 5 to 1
     for (let i = 0; i < changedFiles.length; i += batchSize) {
         const batch = changedFiles.slice(i, i + batchSize);
-        await Promise.all(batch.map(file => documentSingleFile(rootPath, individualDocsFolder, file)));
+        // Process one at a time instead of using Promise.all
+        for (const file of batch) {
+            await documentSingleFile(rootPath, individualDocsFolder, file);
+            // Add a delay between files
+            await delay(1000);
+        }
     }
 }
 
@@ -775,60 +790,80 @@ function addJavaSpecificPrompt(prompt: string, content: string): string {
     return prompt;
 }
 
-async function generateWithGemini(prompt: string): Promise<string> {
-    try {
-        outputChannel.appendLine('Calling Gemini API...');
-        
-        const response = await axios.post(
-            'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent',
-            {
-                contents: [{ 
-                    parts: [{ 
-                        text: prompt + "\n\nPlease format your response as markdown with appropriate headings, code blocks with syntax highlighting, and well-structured sections. Focus on accuracy and thoroughness in your analysis." 
-                    }] 
-                }],
-                generationConfig: {
-                    temperature: 0.1,  // Lower temperature for more accurate/consistent results
-                    maxOutputTokens: 8192,
-                    topP: 0.95,
-                    topK: 40
-                },
-                safetySettings: [
-                    {
-                        category: "HARM_CATEGORY_DANGEROUS_CONTENT",
-                        threshold: "BLOCK_MEDIUM_AND_ABOVE"
-                    }
-                ]
-            },
-            {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'x-goog-api-key': geminiApiKey
-                }
-            }
-        );
+// Add this utility function
+async function delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
-        if (response.data && response.data.candidates && response.data.candidates[0].content) {
-            outputChannel.appendLine('Gemini API call successful');
-            return response.data.candidates[0].content.parts[0].text;
-        } else {
-            outputChannel.appendLine('Invalid response format from Gemini API: ' + JSON.stringify(response.data));
-            throw new Error('Invalid response format from Gemini API');
+// Update the queue usage in generateWithGemini function
+function generateWithGemini(prompt: string): Promise<string> {
+    return apiQueue.add(async () => {
+        try {
+            outputChannel.appendLine('Calling Gemini API...');
+            const response = await axios.post(
+                'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent',
+                {
+                    contents: [{
+                        parts: [{
+                            text: prompt + "\n\nPlease format your response as markdown with appropriate headings, code blocks with syntax highlighting, and well-structured sections. Focus on accuracy and thoroughness in your analysis."
+                        }]
+                    }],
+                    generationConfig: {
+                        temperature: 0.1,  // Lower temperature for more accurate/consistent results
+                        maxOutputTokens: 8192,
+                        topP: 0.95,
+                        topK: 40
+                    },
+                    safetySettings: [
+                        {
+                            category: "HARM_CATEGORY_DANGEROUS_CONTENT",
+                            threshold: "BLOCK_MEDIUM_AND_ABOVE"
+                        }
+                    ]
+                },
+                {
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'x-goog-api-key': geminiApiKey
+                    }
+                }
+            );
+
+            if (response.data && response.data.candidates && response.data.candidates[0].content) {
+                outputChannel.appendLine('Gemini API call successful');
+                return response.data.candidates[0].content.parts[0].text;
+            } else {
+                throw new Error('Invalid response format from Gemini API');
+            }
+        } catch (error: any) {
+            // Add to your error handling
+            if (error.response && error.response.status === 429) {
+                // Parse retry info from error response
+                const retryDelay = error.response.data?.error?.details?.find(
+                    (d: any) => d["@type"]?.includes("RetryInfo")
+                )?.retryDelay;
+
+                // Extract seconds from "13s" format
+                const waitSeconds = retryDelay ? parseInt(retryDelay.replace('s', '')) : 60;
+
+                outputChannel.appendLine(`Rate limited. Waiting ${waitSeconds} seconds as advised by API...`);
+                await delay(waitSeconds * 1000);
+                // Then retry the request
+            }
+            outputChannel.appendLine(`Gemini API Error: ${error.message}`);
+            throw error;
         }
-    } catch (error: any) {
-        outputChannel.appendLine(`Gemini API Error: ${error.message}`);
-        if (error.response) {
-            outputChannel.appendLine(`Status: ${error.response.status}, Data: ${JSON.stringify(error.response.data)}`);
-        }
-        throw new Error(`Gemini API Error: ${error.message}`);
-    }
+
+        // Add delay before next request
+        await delay(1000);
+    });
 }
 
 export function deactivate(): void { }
 
 function extractImports(content: string, fileExt: string): string[] {
     const imports: string[] = [];
-    
+
     try {
         // JavaScript/TypeScript
         if (['.js', '.ts', '.jsx', '.tsx'].includes(fileExt)) {
@@ -838,13 +873,13 @@ function extractImports(content: string, fileExt: string): string[] {
             while ((match = es6ImportRegex.exec(content)) !== null) {
                 if (match[1]) imports.push(match[1]);
             }
-            
+
             // Match CommonJS requires
             const requireRegex = /require\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
             while ((match = requireRegex.exec(content)) !== null) {
                 if (match[1]) imports.push(match[1]);
             }
-        } 
+        }
         // Python
         else if (fileExt === '.py') {
             // Match Python imports
@@ -853,7 +888,7 @@ function extractImports(content: string, fileExt: string): string[] {
             while ((match = importFromRegex.exec(content)) !== null) {
                 if (match[1]) imports.push(match[1]);
             }
-            
+
             const importRegex = /import\s+([^\s,]+)/g;
             while ((match = importRegex.exec(content)) !== null) {
                 if (match[1]) imports.push(match[1]);
@@ -884,7 +919,7 @@ function extractImports(content: string, fileExt: string): string[] {
                     }
                 }
             }
-            
+
             // Single-line imports
             const singleImportRegex = /import\s+"([^"]+)"/g;
             while ((match = singleImportRegex.exec(content)) !== null) {
@@ -894,7 +929,7 @@ function extractImports(content: string, fileExt: string): string[] {
     } catch (err) {
         outputChannel.appendLine(`Error extracting imports: ${err instanceof Error ? err.message : String(err)}`);
     }
-    
+
     return imports;
 }
 
@@ -903,7 +938,7 @@ function resolveRelativeImport(sourceFile: string, importPath: string, rootPath:
         // Get directory containing the source file
         const sourceDir = path.dirname(sourceFile);
         let resolvedPath = '';
-        
+
         // Handle relative imports
         if (importPath.startsWith('.')) {
             // Normalize to forward slashes for consistency
@@ -912,7 +947,7 @@ function resolveRelativeImport(sourceFile: string, importPath: string, rootPath:
             // For non-relative imports, just return as is
             return importPath;
         }
-        
+
         // Remove file extension if present
         const ext = path.extname(resolvedPath);
         if (ext) {
@@ -922,7 +957,7 @@ function resolveRelativeImport(sourceFile: string, importPath: string, rootPath:
                 return resolvedPath;
             }
         }
-        
+
         // Try common extensions if no extension or file not found
         const extensions = ['.js', '.ts', '.jsx', '.tsx', '.py', '.java', '.go'];
         for (const ext of extensions) {
@@ -931,7 +966,7 @@ function resolveRelativeImport(sourceFile: string, importPath: string, rootPath:
                 return (resolvedPath + ext).replace(/\\/g, '/');
             }
         }
-        
+
         // Handle index files in directories
         for (const ext of extensions) {
             const indexPath = path.join(resolvedPath, 'index' + ext);
@@ -940,7 +975,7 @@ function resolveRelativeImport(sourceFile: string, importPath: string, rootPath:
                 return indexPath.replace(/\\/g, '/');
             }
         }
-        
+
         // If we can't resolve it exactly, just return the normalized path
         return resolvedPath;
     } catch (err) {

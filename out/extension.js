@@ -43,8 +43,14 @@ const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 const child_process_1 = require("child_process");
 const axios_1 = __importDefault(require("axios"));
+const p_queue_1 = __importDefault(require("p-queue"));
 let geminiApiKey = '';
 let outputChannel;
+// Create a request queue with concurrency limit
+const apiQueue = new p_queue_1.default({
+    concurrency: 1,
+    timeout: 60000
+});
 /**
  * This method is called when your extension is activated
  * @param context - The extension context
@@ -550,11 +556,15 @@ async function generateIndividualDocs(rootPath, docsFolder) {
             if (!fs.existsSync(individualDocsFolder)) {
                 fs.mkdirSync(individualDocsFolder);
             }
-            // Process files in batches to avoid overloading
-            const batchSize = 5;
+            const batchSize = 1; // Change from 5 to 1
             for (let i = 0; i < files.length; i += batchSize) {
                 const batch = files.slice(i, i + batchSize);
-                await Promise.all(batch.map(file => documentSingleFile(rootPath, individualDocsFolder, file)));
+                // Process one at a time instead of using Promise.all
+                for (const file of batch) {
+                    await documentSingleFile(rootPath, individualDocsFolder, file);
+                    // Add a delay between files
+                    await delay(1000);
+                }
             }
             resolve();
         });
@@ -565,11 +575,15 @@ async function updateFileDocs(rootPath, docsFolder, changedFiles) {
     if (!fs.existsSync(individualDocsFolder)) {
         fs.mkdirSync(individualDocsFolder);
     }
-    // Process files in batches
-    const batchSize = 5;
+    const batchSize = 1; // Change from 5 to 1
     for (let i = 0; i < changedFiles.length; i += batchSize) {
         const batch = changedFiles.slice(i, i + batchSize);
-        await Promise.all(batch.map(file => documentSingleFile(rootPath, individualDocsFolder, file)));
+        // Process one at a time instead of using Promise.all
+        for (const file of batch) {
+            await documentSingleFile(rootPath, individualDocsFolder, file);
+            // Add a delay between files
+            await delay(1000);
+        }
     }
 }
 async function documentSingleFile(rootPath, docsFolder, filePath) {
@@ -713,49 +727,64 @@ function addJavaSpecificPrompt(prompt, content) {
     }
     return prompt;
 }
-async function generateWithGemini(prompt) {
-    try {
-        outputChannel.appendLine('Calling Gemini API...');
-        const response = await axios_1.default.post('https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent', {
-            contents: [{
-                    parts: [{
-                            text: prompt + "\n\nPlease format your response as markdown with appropriate headings, code blocks with syntax highlighting, and well-structured sections. Focus on accuracy and thoroughness in your analysis."
-                        }]
-                }],
-            generationConfig: {
-                temperature: 0.1, // Lower temperature for more accurate/consistent results
-                maxOutputTokens: 8192,
-                topP: 0.95,
-                topK: 40
-            },
-            safetySettings: [
-                {
-                    category: "HARM_CATEGORY_DANGEROUS_CONTENT",
-                    threshold: "BLOCK_MEDIUM_AND_ABOVE"
+// Add this utility function
+async function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+// Update the queue usage in generateWithGemini function
+function generateWithGemini(prompt) {
+    return apiQueue.add(async () => {
+        try {
+            outputChannel.appendLine('Calling Gemini API...');
+            const response = await axios_1.default.post('https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent', {
+                contents: [{
+                        parts: [{
+                                text: prompt + "\n\nPlease format your response as markdown with appropriate headings, code blocks with syntax highlighting, and well-structured sections. Focus on accuracy and thoroughness in your analysis."
+                            }]
+                    }],
+                generationConfig: {
+                    temperature: 0.1, // Lower temperature for more accurate/consistent results
+                    maxOutputTokens: 8192,
+                    topP: 0.95,
+                    topK: 40
+                },
+                safetySettings: [
+                    {
+                        category: "HARM_CATEGORY_DANGEROUS_CONTENT",
+                        threshold: "BLOCK_MEDIUM_AND_ABOVE"
+                    }
+                ]
+            }, {
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-goog-api-key': geminiApiKey
                 }
-            ]
-        }, {
-            headers: {
-                'Content-Type': 'application/json',
-                'x-goog-api-key': geminiApiKey
+            });
+            if (response.data && response.data.candidates && response.data.candidates[0].content) {
+                outputChannel.appendLine('Gemini API call successful');
+                return response.data.candidates[0].content.parts[0].text;
             }
-        });
-        if (response.data && response.data.candidates && response.data.candidates[0].content) {
-            outputChannel.appendLine('Gemini API call successful');
-            return response.data.candidates[0].content.parts[0].text;
+            else {
+                throw new Error('Invalid response format from Gemini API');
+            }
         }
-        else {
-            outputChannel.appendLine('Invalid response format from Gemini API: ' + JSON.stringify(response.data));
-            throw new Error('Invalid response format from Gemini API');
+        catch (error) {
+            // Add to your error handling
+            if (error.response && error.response.status === 429) {
+                // Parse retry info from error response
+                const retryDelay = error.response.data?.error?.details?.find((d) => d["@type"]?.includes("RetryInfo"))?.retryDelay;
+                // Extract seconds from "13s" format
+                const waitSeconds = retryDelay ? parseInt(retryDelay.replace('s', '')) : 60;
+                outputChannel.appendLine(`Rate limited. Waiting ${waitSeconds} seconds as advised by API...`);
+                await delay(waitSeconds * 1000);
+                // Then retry the request
+            }
+            outputChannel.appendLine(`Gemini API Error: ${error.message}`);
+            throw error;
         }
-    }
-    catch (error) {
-        outputChannel.appendLine(`Gemini API Error: ${error.message}`);
-        if (error.response) {
-            outputChannel.appendLine(`Status: ${error.response.status}, Data: ${JSON.stringify(error.response.data)}`);
-        }
-        throw new Error(`Gemini API Error: ${error.message}`);
-    }
+        // Add delay before next request
+        await delay(1000);
+    });
 }
 function deactivate() { }
 function extractImports(content, fileExt) {

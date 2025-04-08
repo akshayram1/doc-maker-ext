@@ -1,0 +1,29 @@
+{
+  "dependencies": [
+    {
+      "file": "extension.js",
+      "deps": []
+    },
+    {
+      "file": "out/extension.js",
+      "deps": [
+        "vscode",
+        "fs",
+        "path",
+        "child_process",
+        "axios"
+      ]
+    },
+    {
+      "file": "src/extension.ts",
+      "deps": [
+        "vscode",
+        "fs",
+        "path",
+        "child_process",
+        "axios"
+      ]
+    }
+  ],
+  "reverseDeps": []
+}
